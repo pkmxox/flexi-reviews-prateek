@@ -4,9 +4,15 @@ import Header from "./Header";
 import DoneForYou from "./DoneForYou";
 import Image from "next/image";
 import DotsCanvas from "./DotsCanvas";
-import { Children, cloneElement, isValidElement, useEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
+import { Children, cloneElement, isValidElement, memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
+
+// GPU-friendly defaults: avoid layout thrash, batch overwrites.
+gsap.defaults({ overwrite: "auto" });
+if (typeof window !== "undefined") {
+  ScrollTrigger.config({ ignoreMobileResize: true });
+}
 import { Button } from "./ui/Button";
 import { QrCode, Bot, LayoutList, BarChart3, Megaphone, Globe, CreditCard, Clock, ShieldCheck, Pencil, MessagesSquare, PieChart, Building, Star, TrendingUp, Smile, Zap, User, LayoutGrid, FileText, Asterisk, ThumbsUp, ShoppingBag, MapPin, UtensilsCrossed, ChevronDown, ArrowRight, House, Layers, Phone, Navigation, ShoppingCart, Building2, Dumbbell, Scissors, type LucideIcon } from "lucide-react";
 
@@ -214,25 +220,44 @@ const industries: { icon: LucideIcon; label: string }[] = [
   { icon: Smile, label: "Dentists" },
 ];
 
-function InfiniteMarquee({ children, className = "" }: { children: ReactNode; className?: string }) {
-  const copies = [0, 1, 2].map((copy) =>
-    Children.map(children, (child, i) =>
-      isValidElement(child) ? cloneElement(child, { key: `${copy}-${i}` }) : child
-    )
+const STAT_ITEMS = [
+  { label: "Platforms Integrated", value: "60+", icon: Globe },
+  { label: "Reviews Collected", value: "2.4M+", icon: MessagesSquare },
+  { label: "Businesses Active", value: "25K+", icon: Building },
+  { label: "Avg. Rating Boost", value: "+0.8★", icon: Star },
+] as const;
+
+const INSIGHT_ROWS = [
+  { icon: TrendingUp, label: "Rating trend", value: "86%", width: "w-[86%]" },
+  { icon: Smile, label: "Positive sentiment", value: "92%", width: "w-[92%]" },
+  { icon: Zap, label: "Auto response rate", value: "78%", width: "w-[78%]" },
+] as const;
+
+// Pure CSS marquee: transform-only, GPU composited. Keep 3 copies so
+// -33.333% loops seamlessly. Pause offscreen via content-visibility parent.
+const InfiniteMarquee = memo(function InfiniteMarquee({ children, className = "" }: { children: ReactNode; className?: string }) {
+  const copies = useMemo(
+    () =>
+      [0, 1, 2].map((copy) =>
+        Children.map(children, (child, i) =>
+          isValidElement(child) ? cloneElement(child, { key: `${copy}-${i}` }) : child
+        )
+      ),
+    [children]
   );
 
   return (
     <div
       className={`group relative overflow-hidden [mask-image:linear-gradient(to_right,transparent,black_6%,black_94%,transparent)] ${className}`}
     >
-      <div className="flex w-max animate-marquee gap-5 py-2 group-hover:[animation-play-state:paused]">
+      <div className="flex w-max transform-gpu will-change-transform animate-marquee gap-5 py-2 motion-reduce:animate-none group-hover:[animation-play-state:paused]">
         {copies}
       </div>
     </div>
   );
-}
+});
 
-function Stars({ count = 5, dimLast = false }: { count?: number; dimLast?: boolean }) {
+const Stars = memo(function Stars({ count = 5, dimLast = false }: { count?: number; dimLast?: boolean }) {
   return (
     <span className="inline-flex items-center gap-0.5">
       {Array.from({ length: count }).map((_, i) => (
@@ -247,13 +272,13 @@ function Stars({ count = 5, dimLast = false }: { count?: number; dimLast?: boole
       ))}
     </span>
   );
-}
+});
 
-function WidgetGallery() {
+const WidgetGallery = memo(function WidgetGallery() {
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 [content-visibility:auto] [contain-intrinsic-size:auto_600px]">
       <div className="group relative overflow-hidden [mask-image:linear-gradient(to_right,transparent,black_12%,black_88%,transparent)]">
-        <div className="flex animate-marquee gap-3 w-max group-hover:[animation-play-state:paused]">
+        <div className="flex transform-gpu will-change-transform animate-marquee gap-3 w-max motion-reduce:animate-none group-hover:[animation-play-state:paused]">
           {[0, 1].map((copy) => (
             <div key={copy} className="flex gap-3" aria-hidden={copy > 0}>
               {dashSources.map((source) => (
@@ -277,10 +302,10 @@ function WidgetGallery() {
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {widgetTypes.map((widget, i) => (
+        {widgetTypes.map((widget) => (
           <div
             key={widget.label}
-            className={`rounded-2xl border p-5 flex items-start gap-4 transition-all duration-300 hover:-translate-y-1 hover:shadow-lg ${
+            className={`rounded-2xl border p-5 flex items-start gap-4 transform-gpu transition-[transform,box-shadow,border-color] duration-300 hover:-translate-y-1 hover:shadow-lg ${
               widget.featured
                 ? "border-primary/40 bg-gradient-to-br from-primary/5 via-white to-white"
                 : "border-gray-200/80 hover:border-primary/40"
@@ -310,19 +335,62 @@ function WidgetGallery() {
       </div>
     </div>
   );
-}
+});
 
-function AnalyticsDashboard({
-  dashCounts,
+const AnalyticsDashboard = memo(function AnalyticsDashboard({
   chartLineRef,
   chartAreaRef,
 }: {
-  dashCounts: number[];
   chartLineRef: RefObject<SVGPathElement | null>;
   chartAreaRef: RefObject<SVGPathElement | null>;
 }) {
+  // Self-contained count-up: isolated state so the 60fps tween only
+  // re-renders this card, not the entire homepage.
+  // Reduced-motion initial value avoids a sync setState in the effect below.
+  const [counts, setCounts] = useState<number[]>(() =>
+    typeof window !== "undefined" &&
+    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+      ? dashStats.map((s) => s.value)
+      : dashStats.map(() => 0)
+  );
+  const rootRef = useRef<HTMLDivElement>(null);
+  const countedRef = useRef(false);
+
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el || countedRef.current) return;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      countedRef.current = true;
+      return;
+    }
+    let raf = 0;
+    const io = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry.isIntersecting || countedRef.current) return;
+        countedRef.current = true;
+        io.disconnect();
+        const start = performance.now();
+        const duration = 1400;
+        const tick = (now: number) => {
+          const t = Math.min(1, (now - start) / duration);
+          // easeOutCubic — cheap, no GSAP ticker, no parent re-render
+          const eased = 1 - Math.pow(1 - t, 3);
+          setCounts(dashStats.map((s) => +(s.value * eased).toFixed(s.decimals)));
+          if (t < 1) raf = requestAnimationFrame(tick);
+        };
+        raf = requestAnimationFrame(tick);
+      },
+      { rootMargin: "200px 0px" }
+    );
+    io.observe(el);
+    return () => {
+      io.disconnect();
+      cancelAnimationFrame(raf);
+    };
+  }, []);
+
   return (
-    <div className="space-y-5">
+    <div ref={rootRef} className="space-y-5">
       <div className="grid grid-cols-2 xl:grid-cols-4 gap-3">
         {dashStats.map((stat, i) => (
           <div
@@ -334,10 +402,10 @@ function AnalyticsDashboard({
             </span>
             <div className="flex-1 min-w-0">
               <p className="text-[11px] font-medium text-gray-500 leading-tight">{stat.label}</p>
-              <p className="text-[22px] font-extrabold text-dark mt-0.5">
+              <p className="text-[22px] font-extrabold text-dark mt-0.5 tabular-nums">
                 {stat.decimals > 0
-                  ? dashCounts[i].toFixed(stat.decimals)
-                  : Math.round(dashCounts[i]).toLocaleString("en-US")}
+                  ? counts[i].toFixed(stat.decimals)
+                  : Math.round(counts[i]).toLocaleString("en-US")}
               </p>
               <p className="inline-flex items-center gap-1 text-xs font-semibold text-primary mt-1">
                 <TrendingUp className="w-3 h-3" />
@@ -422,7 +490,7 @@ function AnalyticsDashboard({
       </div>
     </div>
   );
-}
+});
 
 export default function Homepage2() {
   const headlineRef = useRef<HTMLHeadingElement>(null);
@@ -436,17 +504,15 @@ export default function Homepage2() {
   const statCard2Ref = useRef<HTMLDivElement>(null);
   const featuresSectionRef = useRef<HTMLDivElement>(null);
   const [activeAi, setActiveAi] = useState(0);
-  const activeFeature = aiFeatures[activeAi];
+  const activeFeature = useMemo(() => aiFeatures[activeAi], [activeAi]);
   const aiSectionRef = useRef<HTMLElement>(null);
   const aiProgressRef = useRef<HTMLDivElement>(null);
   const aiSTRef = useRef<ScrollTrigger | null>(null);
   const chartLineRef = useRef<SVGPathElement>(null);
   const chartAreaRef = useRef<SVGPathElement>(null);
-  const countedRef = useRef(false);
-  const [dashCounts, setDashCounts] = useState<number[]>(dashStats.map(() => 0));
   const [activeTab, setActiveTab] = useState(0);
 
-  const goToAi = (i: number) => {
+  const goToAi = useCallback((i: number) => {
     const st = aiSTRef.current;
     if (st) {
       const y = st.start + ((i + 0.5) / aiFeatures.length) * (st.end - st.start);
@@ -454,77 +520,20 @@ export default function Homepage2() {
     } else {
       setActiveAi(i);
     }
-  };
+  }, []);
 
   useEffect(() => {
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
     const ctx = gsap.context(() => {
-      gsap.from(headlineRef.current, {
-        y: 40,
-        opacity: 0,
-        duration: 0.8,
-        ease: "power3.out",
-      });
-
-      gsap.from(subheadRef.current, {
-        y: 30,
-        opacity: 0,
-        duration: 0.8,
-        ease: "power3.out",
-        delay: 0.1,
-      });
-
-      gsap.from(ctaPrimaryRef.current, {
-        y: 20,
-        opacity: 0,
-        scale: 0.9,
-        duration: 0.6,
-        ease: "power3.out",
-        delay: 0.2,
-      });
-
-      gsap.from(ctaSecondaryRef.current, {
-        y: 20,
-        opacity: 0,
-        scale: 0.9,
-        duration: 0.6,
-        ease: "power3.out",
-        delay: 0.3,
-      });
-
-      gsap.from(trustBadgesRef.current, {
-        y: 20,
-        opacity: 0,
-        duration: 0.6,
-        ease: "power3.out",
-        delay: 0.4,
-      });
-
-      gsap.from(heroImageWrapperRef.current, {
-        y: 60,
-        opacity: 0,
-        scale: 0.95,
-        duration: 1,
-        ease: "power3.out",
-        delay: 0.5,
-      });
-
-      gsap.from(statCard1Ref.current, {
-        y: 40,
-        opacity: 0,
-        scale: 0.9,
-        duration: 0.8,
-        ease: "elastic.out(1, 0.5)",
-        delay: 0.7,
-      });
-
-      gsap.from(statCard2Ref.current, {
-        y: 40,
-        opacity: 0,
-        scale: 0.9,
-        duration: 0.8,
-        ease: "elastic.out(1, 0.5)",
-        delay: 0.8,
-      });
+      // Single hero timeline: one ticker, transform+opacity only, no elastic.
+      const hero = gsap.timeline({ defaults: { ease: "power3.out", overwrite: "auto" } });
+      hero
+        .from(headlineRef.current, { y: 32, opacity: 0, duration: 0.7 }, 0)
+        .from(subheadRef.current, { y: 24, opacity: 0, duration: 0.7 }, 0.08)
+        .from([ctaPrimaryRef.current, ctaSecondaryRef.current], { y: 16, opacity: 0, duration: 0.5, stagger: 0.08 }, 0.16)
+        .from(trustBadgesRef.current, { y: 16, opacity: 0, duration: 0.5 }, 0.28)
+        .from(heroImageWrapperRef.current, { y: 48, opacity: 0, duration: 0.9 }, 0.32)
+        .from([statCard1Ref.current, statCard2Ref.current], { y: 24, opacity: 0, duration: 0.6, stagger: 0.1 }, 0.55);
 
       gsap.fromTo(
         ".feature-card",
@@ -544,15 +553,16 @@ export default function Homepage2() {
       );
 
       gsap.from(".stat-item", {
-        y: 30,
+        y: 24,
         opacity: 0,
-        duration: 0.6,
+        duration: 0.5,
         ease: "power3.out",
-        stagger: 0.1,
-        delay: 0.5,
+        stagger: 0.08,
+        clearProps: "transform",
         scrollTrigger: {
           trigger: ".platforms-section",
-          start: "top 70%",
+          start: "top 75%",
+          once: true,
         },
       });
 
@@ -648,11 +658,11 @@ export default function Homepage2() {
         { strokeDashoffset: 1400 },
         {
           strokeDashoffset: 0,
-          duration: 1.8,
+          duration: 1.6,
           ease: "power2.out",
           scrollTrigger: {
             trigger: ".code-showcase-section",
-            start: "top 60%",
+            start: "top 65%",
             once: true,
           },
         }
@@ -663,53 +673,41 @@ export default function Homepage2() {
         { opacity: 0 },
         {
           opacity: 1,
-          duration: 1,
-          delay: 0.9,
+          duration: 0.8,
           scrollTrigger: {
             trigger: ".code-showcase-section",
-            start: "top 60%",
+            start: "top 65%",
             once: true,
           },
         }
       );
 
-      ScrollTrigger.create({
-        trigger: ".code-showcase-section",
-        start: "top 70%",
-        once: true,
-        onEnter: () => {          if (countedRef.current) return;
-          countedRef.current = true;
-          const progress = { t: 0 };
-          gsap.to(progress, {
-            t: 1,
-            duration: 1.6,
-            ease: "power2.out",
-            onUpdate: () =>
-              setDashCounts(
-                dashStats.map((s) => +(s.value * progress.t).toFixed(s.decimals))
-              ),
-          });
-        },
-      });
-
       // Scroll-driven showcase (desktop): CSS sticky keeps the content
       // fixed while ScrollTrigger only reads progress to swap panels.
       // No GSAP pin, so a mis-measurement can never blank the section.
+      // rAF-throttled: progress bar via direct DOM, tab swap only on index change.
       const mm = gsap.matchMedia();
       mm.add("(min-width: 1024px)", () => {
+        let raf = 0;
+        let lastIdx = -1;
         const st = ScrollTrigger.create({
           trigger: aiSectionRef.current,
           start: "top top",
           end: "bottom bottom",
           onUpdate: (self) => {
+            if (aiProgressRef.current) {
+              aiProgressRef.current.style.transform = `scaleX(${self.progress})`;
+            }
             const idx = Math.min(
               aiFeatures.length - 1,
               Math.floor(self.progress * aiFeatures.length)
             );
-            setActiveAi((prev) => (prev === idx ? prev : idx));
-            if (aiProgressRef.current) {
-              aiProgressRef.current.style.transform = `scaleX(${self.progress})`;
-            }
+            if (idx === lastIdx) return;
+            lastIdx = idx;
+            cancelAnimationFrame(raf);
+            raf = requestAnimationFrame(() =>
+              setActiveAi((prev) => (prev === idx ? prev : idx))
+            );
           },
         });
         aiSTRef.current = st;
@@ -873,7 +871,7 @@ export default function Homepage2() {
                 {logos.map((logo) => (
                   <div
                     key={logo.alt}
-                    className="carousel-item shrink-0 w-[140px] sm:w-[170px] h-20 bg-white border border-gray-100 rounded-2xl flex items-center justify-center gap-2 shadow-sm hover:shadow-[0_16px_32px_-12px_rgba(27,191,106,0.2)] hover:border-primary/30 transition-all duration-300 px-4"
+                    className="carousel-item shrink-0 w-[140px] sm:w-[170px] h-20 bg-white border border-gray-100 rounded-2xl flex items-center justify-center gap-2 shadow-sm hover:shadow-[0_16px_32px_-12px_rgba(27,191,106,0.2)] hover:border-primary/30 transform-gpu transition-[transform,box-shadow,border-color] duration-300 px-4"
                   >
                     <Image
                       src={logo.src}
@@ -881,6 +879,8 @@ export default function Homepage2() {
                       width={120}
                       height={40}
                       sizes="(min-width: 640px) 170px, 140px"
+                      loading="lazy"
+                      decoding="async"
                       className={`${logo.height} w-auto object-contain`}
                     />
                   </div>
@@ -889,18 +889,13 @@ export default function Homepage2() {
             </div>
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 sm:gap-6 mt-6 sm:mt-10 pt-6 sm:pt-8 border-t border-gray-100">
-              {[
-                { label: "Platforms Integrated", value: "60+", icon: Globe },
-                { label: "Reviews Collected", value: "2.4M+", icon: MessagesSquare },
-                { label: "Businesses Active", value: "25K+", icon: Building },
-                { label: "Avg. Rating Boost", value: "+0.8★", icon: Star },
-              ].map((stat, i) => (
+              {STAT_ITEMS.map((stat, i) => (
                 <div key={i} className="stat-item text-center relative">
-                  <div className="relative">
-                    <div className="w-10 h-10 sm:w-12 sm:h-12 mx-auto mb-2 sm:mb-3 bg-primary-subtle rounded-xl flex items-center justify-center">
+                  <div className="relative w-fit mx-auto">
+                    <div className="w-10 h-10 sm:w-12 sm:h-12 mb-2 sm:mb-3 bg-primary-subtle rounded-xl flex items-center justify-center">
                       <stat.icon className="w-5 h-5 sm:w-6 sm:h-6 text-primary" />
                     </div>
-                    <div className="absolute -top-1.5 -right-1.5 sm:-top-2 sm:-right-2 w-3 h-3 sm:w-4 sm:h-4 bg-primary rounded-full" />
+                    <div className="absolute -top-1 -right-1 w-3 h-3 sm:w-3.5 sm:h-3.5 bg-primary rounded-full ring-2 ring-white" />
                   </div>
                   <div className="text-[22px] sm:text-[22px] sm:text-2xl lg:text-3xl font-bold text-dark mb-1">{stat.value}</div>
                   <div className="text-[14px] sm:text-sm text-gray-500 font-medium">{stat.label}</div>
@@ -911,7 +906,7 @@ export default function Homepage2() {
         </section>
 
         <section className="py-10 sm:py-16 lg:py-24 px-2.5 sm:px-6 bg-white relative" ref={featuresSectionRef}>
-          <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_20%_20%,var(--tw-gradient-from)_0%,transparent_50%),radial-gradient(ellipse_at_80%_80%,var(--tw-gradient-to)_0%,transparent_50%)] from-primary/5 via-transparent to-primary/5 pointer-events-none animate-bg-shift" />
+          <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_20%_20%,var(--tw-gradient-from)_0%,transparent_50%),radial-gradient(ellipse_at_80%_80%,var(--tw-gradient-to)_0%,transparent_50%)] from-primary/5 via-transparent to-primary/5 pointer-events-none" />
           <DotsCanvas />
           <div className="absolute top-0 inset-x-0 h-44 lg:h-60 bg-gradient-to-b from-white to-transparent pointer-events-none" />
           <div className="absolute bottom-0 inset-x-0 h-44 lg:h-60 bg-gradient-to-t from-white to-transparent pointer-events-none" />
@@ -933,7 +928,7 @@ export default function Homepage2() {
                 {features.map((feature, i) => (
                   <article
                     key={feature.title}
-                    className="feature-card bg-white rounded-2xl p-6 sm:p-8 border border-gray-100 hover:shadow-lg hover:-translate-y-1 transition-all duration-300"
+                    className="feature-card bg-white rounded-2xl p-6 sm:p-8 border border-gray-100 hover:shadow-lg hover:-translate-y-1 transform-gpu transition-[transform,box-shadow,border-color] duration-300"
                     style={{ "--index": i } as CSSProperties}
                   >
                     <div className="flex items-start gap-4">
@@ -970,7 +965,7 @@ export default function Homepage2() {
             </div>
         </section>
 
-        <section className="py-10 sm:py-16 lg:py-24 px-2.5 sm:px-6 bg-gradient-to-b from-white to-primary-light relative overflow-hidden steps-section">
+        <section className="py-10 sm:py-16 lg:py-24 px-2.5 sm:px-6 bg-gradient-to-b from-white to-primary-light relative overflow-hidden steps-section [content-visibility:auto] [contain-intrinsic-size:auto_900px]">
           <div className="absolute top-24 left-0 w-72 h-72 bg-primary/5 rounded-full blur-3xl pointer-events-none" />
           <div className="absolute bottom-24 right-0 w-80 h-80 bg-primary/5 rounded-full blur-3xl pointer-events-none" />
           <div className="max-w-[1480px] mx-auto px-0 sm:px-5 relative">
@@ -991,7 +986,7 @@ export default function Homepage2() {
                     {step.num}
                   </div>
 
-                  <div className="relative w-full max-w-[300px] rounded-[2rem] border border-gray-100 bg-white shadow-xl shadow-gray-200/60 p-2.5 pb-3 transition-all duration-500 group-hover:shadow-[0_30px_60px_-12px_rgba(27,191,106,0.3)] group-hover:-translate-y-2">
+                  <div className="relative w-full max-w-[300px] rounded-[2rem] border border-gray-100 bg-white shadow-xl shadow-gray-200/60 p-2.5 pb-3 transform-gpu transition-[transform,box-shadow] duration-500 group-hover:shadow-[0_30px_60px_-12px_rgba(27,191,106,0.3)] group-hover:-translate-y-2">
                     <div className="absolute left-1/2 -translate-x-1/2 -top-1 z-10 w-24 h-2 bg-white/90 rounded-full" />
                     <div className="relative overflow-hidden rounded-[1.5rem] bg-gray-50">
                       <Image
@@ -1000,7 +995,9 @@ export default function Homepage2() {
                         width={1122}
                         height={1402}
                         sizes="(min-width: 1024px) 300px, (min-width: 640px) 300px, 100vw"
-                        className="w-full h-auto transition-transform duration-700 group-hover:scale-[1.04]"
+                        loading="lazy"
+                        decoding="async"
+                        className="w-full h-auto transform-gpu transition-transform duration-700 group-hover:scale-[1.04]"
                       />
                       <div className="absolute top-2 right-2 bg-white/90 backdrop-blur rounded-full px-2.5 py-1 text-[11px] font-bold text-primary shadow-sm">
                         Step {step.num}
@@ -1052,7 +1049,7 @@ export default function Homepage2() {
                 <button
                   key={feature.title}
                   onClick={() => goToAi(i)}
-                  className={`ai-tab flex items-center gap-2.5 rounded-full px-4 py-2.5 text-sm font-semibold transition-all duration-300 ${
+                  className={`ai-tab flex items-center gap-2.5 rounded-full px-4 py-2.5 text-sm font-semibold transform-gpu transition-[transform,box-shadow,border-color] duration-300 ${
                     i === activeAi
                       ? "bg-primary text-white shadow-lg shadow-primary/30 scale-105"
                       : "bg-white text-dark border border-gray-200 hover:border-primary/50 hover:text-primary"
@@ -1096,7 +1093,7 @@ export default function Homepage2() {
                         key={i}
                         onClick={() => goToAi(i)}
                         aria-label={`Show ${aiFeatures[i].title}`}
-                        className={`h-2 rounded-full transition-all duration-300 ${
+                        className={`h-2 rounded-full transform-gpu transition-[transform,box-shadow,border-color] duration-300 ${
                           i === activeAi ? "w-8 bg-primary" : "w-2 bg-gray-300 hover:bg-primary/50"
                         }`}
                       />
@@ -1132,6 +1129,8 @@ export default function Homepage2() {
                           width={activeFeature.imgWidth}
                           height={activeFeature.imgHeight}
                           sizes="(min-width: 1024px) 55vw, 100vw"
+                          loading="lazy"
+                          decoding="async"
                           className="w-full h-auto block"
                         />
                       </div>
@@ -1144,15 +1143,13 @@ export default function Homepage2() {
                             width={activeFeature.imgWidth}
                             height={activeFeature.imgHeight}
                             sizes="(min-width: 1024px) 25vw, (min-width: 640px) 42vw, 100vw"
+                            loading="lazy"
+                            decoding="async"
                             className="w-full h-auto block md:h-full md:object-contain"
                           />
                         </div>
                         <div className="flex-1 flex flex-col justify-center gap-3">
-                          {[
-                            { icon: TrendingUp, label: "Rating trend", value: "86%", width: "w-[86%]" },
-                            { icon: Smile, label: "Positive sentiment", value: "92%", width: "w-[92%]" },
-                            { icon: Zap, label: "Auto response rate", value: "78%", width: "w-[78%]" },
-                          ].map((insight, j) => (
+                          {INSIGHT_ROWS.map((insight, j) => (
                             <div
                               key={insight.label}
                               className="animate-fade-in-up bg-white rounded-xl border border-gray-200/70 shadow-sm p-3.5"
@@ -1182,7 +1179,7 @@ export default function Homepage2() {
         </div>
         </section>
 
-<section className="py-10 sm:py-16 lg:py-24 px-2.5 sm:px-6 bg-white relative overflow-hidden code-showcase-section">
+<section className="py-10 sm:py-16 lg:py-24 px-2.5 sm:px-6 bg-white relative overflow-hidden code-showcase-section [content-visibility:auto] [contain-intrinsic-size:auto_900px]">
           <div className="absolute top-10 left-10 w-72 h-72 bg-primary/5 rounded-full blur-3xl pointer-events-none" />
           <div className="absolute bottom-10 right-10 w-80 h-80 bg-primary/5 rounded-full blur-3xl pointer-events-none" />
           <div className="max-w-[1200px] mx-auto px-0 sm:px-5 relative">
@@ -1235,7 +1232,7 @@ export default function Homepage2() {
                         role="tab"
                         aria-selected={activeTab === 0}
                         onClick={() => setActiveTab(0)}
-                        className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold transition-all duration-300 ${
+                        className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold transform-gpu transition-[transform,box-shadow,border-color] duration-300 ${
                           activeTab === 0
                             ? "bg-white text-primary shadow-md"
                             : "text-gray-500 hover:text-dark"
@@ -1248,7 +1245,7 @@ export default function Homepage2() {
                         role="tab"
                         aria-selected={activeTab === 1}
                         onClick={() => setActiveTab(1)}
-                        className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold transition-all duration-300 ${
+                        className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold transform-gpu transition-[transform,box-shadow,border-color] duration-300 ${
                           activeTab === 1
                             ? "bg-white text-primary shadow-md"
                             : "text-gray-500 hover:text-dark"
@@ -1269,7 +1266,6 @@ export default function Homepage2() {
                       <WidgetGallery />
                     ) : (
                       <AnalyticsDashboard
-                        dashCounts={dashCounts}
                         chartLineRef={chartLineRef}
                         chartAreaRef={chartAreaRef}
                       />
@@ -1307,7 +1303,7 @@ export default function Homepage2() {
           </div>
         </section>
 
-        <section className="py-10 sm:py-16 lg:py-24 px-2.5 sm:px-6 bg-gradient-to-b from-white to-primary-light relative overflow-hidden testimonial-section">
+        <section className="py-10 sm:py-16 lg:py-24 px-2.5 sm:px-6 bg-gradient-to-b from-white to-primary-light relative overflow-hidden testimonial-section [content-visibility:auto] [contain-intrinsic-size:auto_900px]">
           <div className="max-w-[1480px] mx-auto px-0 sm:px-5 relative">
             <div className="text-center max-w-4xl mx-auto mb-12 lg:mb-16">
               <span className="inline-block text-[12px] sm:text-sm uppercase tracking-widest font-semibold text-primary bg-primary-subtle rounded-full px-4 py-1.5 mb-6">
@@ -1339,7 +1335,7 @@ export default function Homepage2() {
                 {testimonials.map((t, i) => (
                   <div
                     key={t.name}
-                    className="testimonial-card bg-white border border-gray-100 rounded-3xl p-6 flex flex-col gap-4 hover:-translate-y-1 hover:shadow-[0_20px_40px_-12px_rgba(27,191,106,0.25)] hover:border-primary/30 transition-all duration-300"
+                    className="testimonial-card bg-white border border-gray-100 rounded-3xl p-6 flex flex-col gap-4 hover:-translate-y-1 hover:shadow-[0_20px_40px_-12px_rgba(27,191,106,0.25)] hover:border-primary/30 transform-gpu transition-[transform,box-shadow,border-color] duration-300"
                   >
                     <Stars count={5} />
                     <p className="text-[16px] text-gray-600 leading-relaxed flex-1">
@@ -1361,7 +1357,7 @@ export default function Homepage2() {
           </div>
         </section>
 
-        <section className="py-10 sm:py-16 lg:py-24 px-2.5 sm:px-6 bg-white relative overflow-hidden integrations-section">
+        <section className="py-10 sm:py-16 lg:py-24 px-2.5 sm:px-6 bg-white relative overflow-hidden integrations-section [content-visibility:auto] [contain-intrinsic-size:auto_800px]">
           <div className="max-w-[1480px] mx-auto px-0 sm:px-5">
             <div className="text-center max-w-4xl mx-auto mb-12 lg:mb-16">
               <span className="inline-block text-[12px] sm:text-sm uppercase tracking-widest font-semibold text-primary bg-primary-subtle rounded-full px-4 py-1.5 mb-6">
@@ -1379,7 +1375,7 @@ export default function Homepage2() {
                 {tools.map((tool) => (
                   <div
                     key={tool.alt}
-                    className="carousel-item shrink-0 w-[190px] sm:w-[210px] h-28 bg-white border border-gray-100 rounded-2xl flex flex-col items-center justify-center gap-2 shadow-sm hover:shadow-[0_16px_32px_-12px_rgba(27,191,106,0.2)] hover:border-primary/30 transition-all duration-300"
+                    className="carousel-item shrink-0 w-[190px] sm:w-[210px] h-28 bg-white border border-gray-100 rounded-2xl flex flex-col items-center justify-center gap-2 shadow-sm hover:shadow-[0_16px_32px_-12px_rgba(27,191,106,0.2)] hover:border-primary/30 transform-gpu transition-[transform,box-shadow,border-color] duration-300"
                   >
                     <Image
                       src={tool.src}
@@ -1387,6 +1383,8 @@ export default function Homepage2() {
                       width={120}
                       height={40}
                       sizes="(min-width: 640px) 210px, 190px"
+                      loading="lazy"
+                      decoding="async"
                       className={`${tool.height} w-auto object-contain`}
                     />
                     <span className="text-xs font-semibold text-dark">{tool.label}</span>
@@ -1408,7 +1406,7 @@ export default function Homepage2() {
                 {industries.map((ind) => (
                   <div
                     key={ind.label}
-                    className="carousel-item shrink-0 w-[150px] sm:w-[170px] h-28 bg-gradient-to-b from-white to-primary-light border border-gray-100 rounded-2xl flex flex-col items-center justify-center gap-2 shadow-sm hover:shadow-[0_16px_32px_-12px_rgba(27,191,106,0.25)] hover:border-primary/30 transition-all duration-300"
+                    className="carousel-item shrink-0 w-[150px] sm:w-[170px] h-28 bg-gradient-to-b from-white to-primary-light border border-gray-100 rounded-2xl flex flex-col items-center justify-center gap-2 shadow-sm hover:shadow-[0_16px_32px_-12px_rgba(27,191,106,0.25)] hover:border-primary/30 transform-gpu transition-[transform,box-shadow,border-color] duration-300"
                   >
                     <ind.icon className="w-7 h-7 text-primary" />
                     <span className="text-sm font-semibold text-dark">{ind.label}</span>
@@ -1434,6 +1432,8 @@ export default function Homepage2() {
                 width={180}
                 height={40}
                 sizes="180px"
+                loading="lazy"
+                decoding="async"
                 className="h-9 w-auto object-contain mb-5"
               />
               <p className="text-gray-400 text-sm leading-relaxed max-w-xs">

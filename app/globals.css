@@ -86,7 +86,10 @@
 }
 
 .animate-marquee {
-  animation: marquee 20s linear infinite;
+  animation: marquee 28s linear infinite;
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
 }
 
 .animate-marquee.paused {
@@ -94,17 +97,43 @@
 }
 
 .animate-fade-in-up {
-  animation: fade-in-up 0.6s ease-out forwards;
+  animation: fade-in-up 0.5s ease-out forwards;
   opacity: 0;
+  will-change: transform, opacity;
 }
 
 .animate-slide-up {
-  animation: slide-up 0.6s ease-out forwards;
+  animation: slide-up 0.5s ease-out forwards;
   opacity: 0;
+  will-change: transform, opacity;
 }
 
 .animate-ping {
-  animation: ping 1s cubic-bezier(0, 0, 0.2, 1) infinite;
+  animation: ping 1.8s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+/* Slow down marquees on mobile GPUs + respect reduced motion */
+@media (max-width: 639px) {
+  .animate-marquee {
+    animation-duration: 36s;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-marquee,
+  .animate-float,
+  .animate-float-soft,
+  .animate-spin-slow,
+  .animate-bg-shift,
+  .animate-gradient-flow,
+  .animate-fade-in-up,
+  .animate-slide-up,
+  .animate-ping {
+    animation: none !important;
+  }
+  html {
+    scroll-behavior: auto;
+  }
 }
 
 :root {

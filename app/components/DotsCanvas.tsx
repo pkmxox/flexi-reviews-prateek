@@ -33,10 +33,16 @@ export default function DotsCanvas() {
 
     let animationId = 0;
     let dots: Dot[] = [];
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    // Cap DPR at 1.5: halves fill cost on retina with no visible difference for 1-2px dots.
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    const rectRef = { left: 0, top: 0, width: 0, height: 0 };
 
     const resize = () => {
       const rect = wrap.getBoundingClientRect();
+      rectRef.left = rect.left;
+      rectRef.top = rect.top;
+      rectRef.width = rect.width;
+      rectRef.height = rect.height;
       canvas.width = Math.max(1, Math.floor(rect.width * dpr));
       canvas.height = Math.max(1, Math.floor(rect.height * dpr));
       canvas.style.width = `${rect.width}px`;
@@ -44,9 +50,17 @@ export default function DotsCanvas() {
       initDots(rect.width, rect.height);
     };
 
+    // Debounce resize via rAF — avoids re-init storm during scroll/resize.
+    let resizeRaf = 0;
+    const onResize = () => {
+      cancelAnimationFrame(resizeRaf);
+      resizeRaf = requestAnimationFrame(resize);
+    };
+
     const initDots = (width: number, height: number) => {
       dots = [];
-      const spacing = 52;
+      // Fewer dots on small screens: same look, ~40% less per-frame work.
+      const spacing = width < 640 ? 64 : 54;
       for (let x = 0; x <= width + spacing; x += spacing) {
         for (let y = 0; y <= height + spacing; y += spacing) {
           const jx = (Math.random() - 0.5) * 14;
@@ -66,21 +80,23 @@ export default function DotsCanvas() {
       }
     };
 
+    const rawMouse = { x: 0, y: 0, active: false };
     const onMouseMove = (e: MouseEvent) => {
-      const rect = canvas.getBoundingClientRect();
-      mouseRef.current = {
-        x: e.clientX - rect.left,
-        y: e.clientY - rect.top,
-      };
+      // Store raw coords only — rect lookup happens once per frame in animate(),
+      // so rapid mousemoves never cause layout thrash.
+      rawMouse.x = e.clientX;
+      rawMouse.y = e.clientY;
+      rawMouse.active = true;
     };
 
     const onMouseLeave = () => {
+      rawMouse.active = false;
       mouseRef.current = null;
     };
 
-    // Listen on the section so hover works even over cards
+    // Listen on the section so hover works even over cards (passive: never blocks scroll)
     const section = wrap.parentElement ?? wrap;
-    section.addEventListener("mousemove", onMouseMove);
+    section.addEventListener("mousemove", onMouseMove, { passive: true });
     section.addEventListener("mouseleave", onMouseLeave);
 
     const animate = () => {
@@ -89,7 +105,21 @@ export default function DotsCanvas() {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, width, height);
 
-      const mouse = mouseRef.current;
+      // Single rect lookup per frame (not per dot / per mousemove).
+      let mouse: { x: number; y: number } | null = null;
+      if (rawMouse.active) {
+        const rect = canvas.getBoundingClientRect();
+        const mx = rawMouse.x - rect.left;
+        const my = rawMouse.y - rect.top;
+        // Ignore mouse far outside canvas — skips all per-dot math.
+        if (mx > -200 && mx < width + 200 && my > -200 && my < height + 200) {
+          mouse = { x: mx, y: my };
+        }
+      }
+      mouseRef.current = mouse;
+
+      const maxDist = 160;
+      const maxDistSq = maxDist * maxDist;
 
       for (const dot of dots) {
         // Drift left-to-right, wrap around
@@ -109,12 +139,14 @@ export default function DotsCanvas() {
           const py = dot.y + dot.dy;
           const mdx = px - mouse.x;
           const mdy = py - mouse.y;
-          const dist = Math.hypot(mdx, mdy);
-          const maxDist = 160;
-          if (dist < maxDist && dist > 0.01) {
+          // Squared-distance check: avoids Math.hypot (sqrt) for every dot.
+          const distSq = mdx * mdx + mdy * mdy;
+          if (distSq < maxDistSq && distSq > 0.0001) {
+            const dist = Math.sqrt(distSq);
             const force = (maxDist - dist) / maxDist;
-            targetDx = (mdx / dist) * force * 22;
-            targetDy = (mdy / dist) * force * 22;
+            const inv = 1 / dist;
+            targetDx = mdx * inv * force * 22;
+            targetDy = mdy * inv * force * 22;
             targetSize = Math.min(4.5, dot.baseSize + force * 2.5);
             targetOpacity = Math.min(0.7, dot.baseOpacity + force * 0.45);
           }
@@ -171,7 +203,7 @@ export default function DotsCanvas() {
       visible = true;
       animate();
     }
-    window.addEventListener("resize", resize);
+    window.addEventListener("resize", onResize, { passive: true });
 
     const onVisibilityChange = () => {
       if (document.hidden) {
@@ -186,9 +218,10 @@ export default function DotsCanvas() {
 
     return () => {
       cancelAnimationFrame(animationId);
+      cancelAnimationFrame(resizeRaf);
       document.removeEventListener("visibilitychange", onVisibilityChange);
       io.disconnect();
-      window.removeEventListener("resize", resize);
+      window.removeEventListener("resize", onResize);
       section.removeEventListener("mousemove", onMouseMove);
       section.removeEventListener("mouseleave", onMouseLeave);
     };
